@@ -1,0 +1,45 @@
+name: Build and Push to ECR
+
+# Triggers on every push to the repository.
+on:
+  push:
+
+# OIDC requires permission to mint an id-token. Everything else is read-only.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  IMAGE_TAG: ange_buhendwa_ecr
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Exchange the GitHub OIDC token for short-lived AWS credentials.
+      # No long-lived AWS keys are stored in GitHub.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:$IMAGE_TAG" -t "$IMAGE:${GITHUB_SHA::7}" .
+          docker push "$IMAGE:$IMAGE_TAG"
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+          echo "Pushed $IMAGE:$IMAGE_TAG and $IMAGE:${GITHUB_SHA::7}"

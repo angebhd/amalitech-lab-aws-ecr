@@ -1,0 +1,26 @@
+# Build output (rebuilt inside the image)
+build/
+.gradle/
+bin/
+out/
+
+# IDE / editor metadata
+.idea/
+.vscode/
+*.iml
+.settings/
+.classpath
+.project
+
+# VCS & CI
+.git/
+.github/
+
+# Docs & local notes (not needed in the image)
+*.md
+NOTES*
+cloudformation/
+
+# OS noise
+.DS_Store
+Thumbs.db
