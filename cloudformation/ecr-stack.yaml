@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Private ECR repository plus the GitHub OIDC provider and a least-privilege
+  IAM role that lets GitHub Actions push images without long-lived AWS keys.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: angebhd
+    Description: GitHub organisation / user that owns the repository.
+
+  GitHubRepo:
+    Type: String
+    Default: amalitech-lab-aws-ecr
+    Description: GitHub repository name allowed to assume the role.
+
+  EcrRepositoryName:
+    Type: String
+    Default: amalitech-lab-aws-ecr
+    Description: Name of the private ECR repository.
+
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Create the GitHub OIDC provider. Set to "false" if the provider
+      (token.actions.githubusercontent.com) already exists in the account.
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  # GitHub's OIDC identity provider. One per AWS account.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bba010ec80a8a08abb5d1b54e9d2c0
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcc
+      Tags:
+        - { Key: Project, Value: amalitech-lab-aws-ecr }
+
+  # Role assumed by GitHub Actions via OIDC, scoped to this single repo.
+  GitHubActionsEcrRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "github-actions-ecr-${EcrRepositoryName}"
+      Description: Allows GitHub Actions to push images to the ECR repository.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Restricts trust to any branch of this repository only.
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:*"
+      Policies:
+        - PolicyName: ecr-push
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Auth token is an account-level action and must use "*".
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              # Push/pull layers and images, scoped to this repository only.
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !GetAtt EcrRepository.Arn
+      Tags:
+        - { Key: Project, Value: amalitech-lab-aws-ecr }
+
+  # Private repository with scan-on-push, encryption and a lifecycle policy.
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref EcrRepositoryName
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      # Keep only the 10 most recent images to control storage cost.
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - { Key: Project, Value: amalitech-lab-aws-ecr }
+        - { Key: ManagedBy, Value: CloudFormation }
+
+Outputs:
+  EcrRepositoryUri:
+    Description: URI used to tag and push images.
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}"
+
+  GitHubActionsRoleArn:
+    Description: ARN to set as the AWS_ROLE_ARN variable in GitHub.
+    Value: !GetAtt GitHubActionsEcrRole.Arn

@@ -1,0 +1,13 @@
+{
+  "template-file-path": "cloudformation/ecr-stack.yaml",
+  "parameters": {
+    "GitHubOrg": "angebhd",
+    "GitHubRepo": "amalitech-lab-aws-ecr",
+    "EcrRepositoryName": "amalitech-lab-aws-ecr",
+    "CreateOidcProvider": "true"
+  },
+  "tags": {
+    "Project": "amalitech-lab-aws-ecr",
+    "ManagedBy": "CloudFormation-GitSync"
+  }
+}
