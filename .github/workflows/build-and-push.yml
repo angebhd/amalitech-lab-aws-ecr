@@ -3,6 +3,8 @@ name: Build and Push to ECR
 # Triggers on every push to the repository.
 on:
   push:
+    branches:
+      - main
 
 # OIDC requires permission to mint an id-token. Everything else is read-only.
 permissions:
