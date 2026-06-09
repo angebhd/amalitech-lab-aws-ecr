@@ -84,8 +84,9 @@ Resources:
     Properties:
       RoleName: !Sub "github-actions-ecr-${EcrRepositoryName}"
       Description: Allows GitHub Actions to push images to the ECR repository.
-      # Maximum session lifetime in seconds (1 hour is sufficient for a CI build).
-      MaxSessionDuration: 3600
+      # 900 s (15 min) is the AWS minimum for AssumeRoleWithWebIdentity.
+      # It is more than enough for a CI build and limits credential exposure time.
+      MaxSessionDuration: 900
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
