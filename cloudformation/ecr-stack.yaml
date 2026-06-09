@@ -3,59 +3,95 @@ Description: >-
   Private ECR repository plus the GitHub OIDC provider and a least-privilege
   IAM role that lets GitHub Actions push images without long-lived AWS keys.
 
+# ---------------------------------------------------------------------------
+# Parameters — all values are centralised here; nothing is hard-coded below.
+# ---------------------------------------------------------------------------
 Parameters:
+
+  # GitHub identity that is allowed to assume the IAM role.
   GitHubOrg:
     Type: String
     Default: angebhd
-    Description: GitHub organisation / user that owns the repository.
+    Description: GitHub organisation or user that owns the repository.
 
   GitHubRepo:
     Type: String
     Default: amalitech-lab-aws-ecr
-    Description: GitHub repository name allowed to assume the role.
+    Description: >-
+      Exact GitHub repository name allowed to assume the role.
+      Only this repo's Actions workflows will receive temporary AWS credentials.
 
+  # ECR repository to create.
   EcrRepositoryName:
     Type: String
     Default: amalitech-lab-aws-ecr
-    Description: Name of the private ECR repository.
+    Description: Name of the private ECR repository to create.
 
+  # Set to "false" when the OIDC provider already exists in the account.
+  # An AWS account can only have one OIDC provider per issuer URL, so
+  # attempting to create a second one results in EntityAlreadyExists.
   CreateOidcProvider:
     Type: String
-    Default: "true"
-    AllowedValues: ["true", "false"]
+    Default: "false"
+    AllowedValues:
+      - "true"
+      - "false"
     Description: >-
-      Create the GitHub OIDC provider. Set to "false" if the provider
-      (token.actions.githubusercontent.com) already exists in the account.
+      Whether to create the GitHub OIDC identity provider.
+      Set to "false" (default) if token.actions.githubusercontent.com
+      already exists under IAM > Identity providers in this account.
 
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
 Conditions:
-  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+  # Only provision the OIDC provider resource when it does not yet exist.
+  ShouldCreateOidcProvider: !Equals
+    - !Ref CreateOidcProvider
+    - "true"
 
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
 Resources:
-  # GitHub's OIDC identity provider. One per AWS account.
+
+  # ---- GitHub OIDC Identity Provider ----------------------------------------
+  # Account-wide trust anchor: tells AWS STS to accept ID tokens issued by
+  # GitHub Actions. Only one provider per issuer URL is allowed per account.
+  # Conditionally created — skip if the provider is already present.
   GitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
     Condition: ShouldCreateOidcProvider
     Properties:
       Url: https://token.actions.githubusercontent.com
+      # sts.amazonaws.com is the required audience for the AssumeRoleWithWebIdentity flow.
       ClientIdList:
         - sts.amazonaws.com
+      # Thumbprints of GitHub's OIDC TLS certificate — required by AWS.
       ThumbprintList:
         - 6938fd4d98bba010ec80a8a08abb5d1b54e9d2c0
         - 1c58a3a8518e8759bf075b76b750d4f2df264fcc
       Tags:
-        - { Key: Project, Value: amalitech-lab-aws-ecr }
+        - Key: Project
+          Value: !Ref EcrRepositoryName
 
-  # Role assumed by GitHub Actions via OIDC, scoped to this single repo.
+  # ---- IAM Role for GitHub Actions ------------------------------------------
+  # Assumed by the workflow via OIDC. The trust policy locks the role to a
+  # single repository and requires the correct audience claim, preventing any
+  # other GitHub repo or identity from assuming it.
   GitHubActionsEcrRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub "github-actions-ecr-${EcrRepositoryName}"
       Description: Allows GitHub Actions to push images to the ECR repository.
+      # Maximum session lifetime in seconds (1 hour is sufficient for a CI build).
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
+            # Reference the provider created by this stack, or fall back to the
+            # pre-existing account-level provider when CreateOidcProvider = false.
             Principal:
               Federated: !If
                 - ShouldCreateOidcProvider
@@ -63,22 +99,25 @@ Resources:
                 - !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
+              # aud must be sts.amazonaws.com — matches the ClientIdList above.
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # sub is scoped to every branch/tag of this one repository only.
               StringLike:
-                # Restricts trust to any branch of this repository only.
                 token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:*"
       Policies:
         - PolicyName: ecr-push
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Auth token is an account-level action and must use "*".
+              # GetAuthorizationToken is an account-level call; it cannot be
+              # scoped to a single repository, so Resource must be "*".
               - Sid: EcrAuth
                 Effect: Allow
-                Action: ecr:GetAuthorizationToken
+                Action:
+                  - ecr:GetAuthorizationToken
                 Resource: "*"
-              # Push/pull layers and images, scoped to this repository only.
+              # All image push/pull actions are scoped to this one ECR repository.
               - Sid: EcrPush
                 Effect: Allow
                 Action:
@@ -91,19 +130,27 @@ Resources:
                   - ecr:GetDownloadUrlForLayer
                 Resource: !GetAtt EcrRepository.Arn
       Tags:
-        - { Key: Project, Value: amalitech-lab-aws-ecr }
+        - Key: Project
+          Value: !Ref EcrRepositoryName
 
-  # Private repository with scan-on-push, encryption and a lifecycle policy.
+  # ---- Private ECR Repository -----------------------------------------------
+  # Stores the Docker images built by the GitHub Actions workflow.
+  # Security features enabled: vulnerability scan on every push, AES-256
+  # encryption at rest, and a lifecycle policy to cap stored image count.
   EcrRepository:
     Type: AWS::ECR::Repository
     Properties:
       RepositoryName: !Ref EcrRepositoryName
+      # MUTABLE allows the workflow to overwrite the release tag on each push.
       ImageTagMutability: MUTABLE
+      # Automatically scan every image for OS and package vulnerabilities.
       ImageScanningConfiguration:
         ScanOnPush: true
+      # Encrypt image layers at rest using AWS-managed AES-256 keys.
       EncryptionConfiguration:
         EncryptionType: AES256
-      # Keep only the 10 most recent images to control storage cost.
+      # Expire old images to avoid unbounded storage growth.
+      # Rule: keep only the 10 most recently pushed images (any tag).
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
@@ -121,14 +168,22 @@ Resources:
             ]
           }
       Tags:
-        - { Key: Project, Value: amalitech-lab-aws-ecr }
-        - { Key: ManagedBy, Value: CloudFormation }
+        - Key: Project
+          Value: !Ref EcrRepositoryName
+        - Key: ManagedBy
+          Value: CloudFormation
 
+# ---------------------------------------------------------------------------
+# Outputs — copy these values into GitHub repository variables after deploy.
+# ---------------------------------------------------------------------------
 Outputs:
+
+  # Full URI used to tag and push the Docker image in the workflow.
   EcrRepositoryUri:
-    Description: URI used to tag and push images.
+    Description: URI used to tag and push images (set as ECR_REPOSITORY in GitHub vars).
     Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}"
 
+  # ARN the workflow passes to configure-aws-credentials to assume the role.
   GitHubActionsRoleArn:
-    Description: ARN to set as the AWS_ROLE_ARN variable in GitHub.
+    Description: Role ARN to set as AWS_ROLE_ARN in GitHub repository variables.
     Value: !GetAtt GitHubActionsEcrRole.Arn
