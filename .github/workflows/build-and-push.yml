@@ -14,7 +14,7 @@ permissions:
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  IMAGE_TAG: ange_buhendwa_ecr
+  IMAGE_TAG: ${{ vars.IMAGE_TAG }}
 
 jobs:
   build-and-push:
